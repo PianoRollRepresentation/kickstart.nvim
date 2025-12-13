@@ -217,13 +217,6 @@ vim.api.nvim_create_autocmd('FileType', {
   end,
 })
 
--- Add closing brace or quote and move cursor inside
-vim.api.nvim_set_keymap('i', '"', '""<left>', { noremap = true })
-vim.api.nvim_set_keymap('i', "'", "''<left>", { noremap = true })
-vim.api.nvim_set_keymap('i', '(', '()<left>', { noremap = true })
-vim.api.nvim_set_keymap('i', '[', '[]<left>', { noremap = true })
-vim.api.nvim_set_keymap('i', '{', '{}<left>', { noremap = true })
-
 -- [[ Basic Autocommands ]]
 --  See `:help lua-guide-autocommands`
 
@@ -862,6 +855,13 @@ require('lazy').setup({
         -- See :h blink-cmp-config-keymap for defining your own keymap
         preset = 'default',
 
+        -- navigation
+        ['<C-j>'] = { 'select_next', 'fallback' },
+        ['<C-k>'] = { 'select_prev', 'fallback' },
+
+        -- confirm with <C-l>
+        ['<C-l>'] = { 'accept', 'fallback' },
+
         -- For more advanced Luasnip keymaps (e.g. selecting choice nodes, expansion) see:
         --    https://github.com/L3MON4D3/LuaSnip?tab=readme-ov-file#keymaps
       },
@@ -1013,6 +1013,7 @@ require('lazy').setup({
   -- require 'kickstart.plugins.neo-tree',
   -- require 'kickstart.plugins.gitsigns', -- adds gitsigns recommend keymaps
   -- require 'custom.plugins.cmp',
+  require 'custom.plugins.autopairs',
 
   -- NOTE: The import below can automatically add your own plugins, configuration, etc from `lua/custom/plugins/*.lua`
   --    This is the easiest way to modularize your config.
