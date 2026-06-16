@@ -963,6 +963,23 @@ require('lazy').setup({
       --  Check out: https://github.com/echasnovski/mini.nvim
     end,
   },
+  { -- Pretty rendering of markdown buffers (headings, bullets, code blocks, etc.)
+    'MeanderingProgrammer/render-markdown.nvim',
+    dependencies = { 'nvim-treesitter/nvim-treesitter', 'nvim-tree/nvim-web-devicons' },
+    ft = { 'markdown' },
+    opts = {
+      heading = {
+        icons = {},
+      },
+      bullet = {
+        icons = { '*', '+', '-' },
+      },
+      checkbox = {
+        unchecked = { icon = '[ ]' },
+        checked = { icon = '[x]' },
+      },
+    },
+  },
   { -- Highlight, edit, and navigate code
     'nvim-treesitter/nvim-treesitter',
     build = ':TSUpdate',
