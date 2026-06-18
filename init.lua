@@ -725,6 +725,7 @@ require('lazy').setup({
         gopls = {},
         ts_ls = {},
         clangd = {},
+        -- C# is handled by seblj/roslyn.nvim (Microsoft Roslyn LSP), see lua/custom/plugins/roslyn.lua.
       }
 
       -- Ensure the servers and tools above are installed
@@ -742,6 +743,8 @@ require('lazy').setup({
       -- for you, so that they are available from within Neovim.
       local ensure_installed = vim.tbl_keys(servers or {})
       vim.list_extend(ensure_installed, {
+        'csharpier', -- Used to format C# code
+        'netcoredbg', -- Used to debug .NET code
         'stylua', -- Used to format Lua code
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
@@ -749,8 +752,15 @@ require('lazy').setup({
       require('mason-lspconfig').setup {
         ensure_installed = {}, -- explicitly set to an empty table (Kickstart populates installs via mason-tool-installer)
         automatic_installation = false,
+        automatic_enable = {
+          exclude = { 'roslyn_ls' }, -- handled by seblyng/roslyn.nvim
+        },
         handlers = {
           function(server_name)
+            if server_name == 'roslyn' or server_name == 'roslyn_ls' then
+              -- C# is handled by seblyng/roslyn.nvim; skip lspconfig's roslyn_ls so we don't run a duplicate server.
+              return
+            end
             local server = servers[server_name] or {}
             -- This handles overriding only values explicitly passed
             -- by the server configuration above. Useful when disabling
@@ -794,6 +804,7 @@ require('lazy').setup({
         end
       end,
       formatters_by_ft = {
+        cs = { 'csharpier' },
         lua = { 'stylua' },
         -- Conform can also run multiple formatters sequentially
         -- python = { "isort", "black" },
@@ -1004,6 +1015,7 @@ require('lazy').setup({
       ensure_installed = {
         'bash',
         'c',
+        'c_sharp',
         'diff',
         'html',
         'lua',
@@ -1012,12 +1024,12 @@ require('lazy').setup({
         'markdown_inline',
         'query',
         'vim',
-        'vimdoc',
         'go',
         'javascript',
       },
       -- Autoinstall languages that are not installed
       auto_install = true,
+      ignore_install = { 'vimdoc' },
       highlight = {
         enable = true,
         -- Some languages depend on vim's regex highlighting system (such as Ruby) for indent rules.
