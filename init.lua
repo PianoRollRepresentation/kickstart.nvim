@@ -743,7 +743,6 @@ require('lazy').setup({
       -- for you, so that they are available from within Neovim.
       local ensure_installed = vim.tbl_keys(servers or {})
       vim.list_extend(ensure_installed, {
-        'csharpier', -- Used to format C# code
         'netcoredbg', -- Used to debug .NET code
         'stylua', -- Used to format Lua code
       })
@@ -804,7 +803,6 @@ require('lazy').setup({
         end
       end,
       formatters_by_ft = {
-        cs = { 'csharpier' },
         lua = { 'stylua' },
         -- Conform can also run multiple formatters sequentially
         -- python = { "isort", "black" },
