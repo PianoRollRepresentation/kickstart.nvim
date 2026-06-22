@@ -227,6 +227,64 @@ vim.api.nvim_create_autocmd('FileType', {
   end,
 })
 
+-- Resolve root-absolute markdown links (e.g. `/src/Foo/bar.md`) against the
+-- current working directory so `gf` opens them in repos that use GitHub-style
+-- repo-root paths. Marksman itself does not resolve these, and Vim's built-in
+-- `gf` treats leading `/` as filesystem-absolute, so we override it locally.
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = 'markdown',
+  callback = function(ev)
+    vim.bo[ev.buf].suffixesadd = '.md'
+    vim.keymap.set('n', 'gf', function()
+      local fname = vim.fn.expand '<cfile>'
+      local anchor = ''
+      local hash = fname:find '#'
+      if hash then
+        anchor = fname:sub(hash)
+        fname = fname:sub(1, hash - 1)
+      end
+      if fname:sub(1, 1) == '/' then
+        fname = vim.fn.getcwd() .. fname
+      end
+      if vim.fn.filereadable(fname) == 0 and not fname:match '%.%w+$' then
+        fname = fname .. '.md'
+      end
+      vim.cmd('edit ' .. vim.fn.fnameescape(fname) .. (anchor ~= '' and ' | normal! /' .. anchor:sub(2) .. '\r' or ''))
+    end, { buffer = ev.buf, desc = 'gf with repo-root-absolute link support' })
+  end,
+})
+
+-- Filter out marksman's "Link to non-existent document" warnings, since we use
+-- repo-root-absolute links that marksman cannot resolve.
+do
+  local function filter_marksman(diags)
+    return vim.tbl_filter(function(d)
+      local m = (d.message or ''):lower()
+      return not m:find 'non%-existent'
+    end, diags or {})
+  end
+
+  local orig_publish = vim.lsp.handlers['textDocument/publishDiagnostics']
+  vim.lsp.handlers['textDocument/publishDiagnostics'] = function(err, result, ctx, config)
+    local client = vim.lsp.get_client_by_id(ctx.client_id)
+    if client and client.name == 'marksman' and result and result.diagnostics then
+      result.diagnostics = filter_marksman(result.diagnostics)
+    end
+    return orig_publish(err, result, ctx, config)
+  end
+
+  local orig_pull = vim.lsp.handlers['textDocument/diagnostic']
+  if orig_pull then
+    vim.lsp.handlers['textDocument/diagnostic'] = function(err, result, ctx, config)
+      local client = vim.lsp.get_client_by_id(ctx.client_id)
+      if client and client.name == 'marksman' and result and result.items then
+        result.items = filter_marksman(result.items)
+      end
+      return orig_pull(err, result, ctx, config)
+    end
+  end
+end
+
 -- [[ Basic Autocommands ]]
 --  See `:help lua-guide-autocommands`
 
@@ -725,6 +783,7 @@ require('lazy').setup({
         gopls = {},
         ts_ls = {},
         clangd = {},
+        marksman = {},
         -- C# is handled by seblj/roslyn.nvim (Microsoft Roslyn LSP), see lua/custom/plugins/roslyn.lua.
       }
 
