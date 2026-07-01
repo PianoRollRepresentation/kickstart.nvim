@@ -15,5 +15,15 @@ return {
         disable_diagnostics = true,
       },
     },
+    keymaps = {
+      file_panel = {
+        { 'n', 'm', '<Cmd>wincmd l<Bar>normal! ]c<CR>', { desc = 'Next change' } },
+        { 'n', 'n', '<Cmd>wincmd l<Bar>normal! [c<CR>', { desc = 'Previous change' } },
+      },
+      view = {
+        { 'n', 'm', ']c', { desc = 'Next change', remap = true } },
+        { 'n', 'n', '[c', { desc = 'Previous change', remap = true } },
+      },
+    },
   },
 }
