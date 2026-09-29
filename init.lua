@@ -784,6 +784,12 @@ require('lazy').setup({
         ts_ls = {},
         clangd = {},
         marksman = {},
+
+        html = {},
+        cssls = {},
+        emmet_language_server = {},
+        angularls = {},
+        bicep = {},
         -- C# is handled by seblj/roslyn.nvim (Microsoft Roslyn LSP), see lua/custom/plugins/roslyn.lua.
       }
 
@@ -804,6 +810,7 @@ require('lazy').setup({
       vim.list_extend(ensure_installed, {
         'netcoredbg', -- Used to debug .NET code
         'stylua', -- Used to format Lua code
+        'eslint_d', -- Used to auto-fix eslint issues (e.g. consistent-type-imports) on save
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 
@@ -856,7 +863,7 @@ require('lazy').setup({
           return nil
         else
           return {
-            timeout_ms = 500,
+            timeout_ms = 10000,
             lsp_format = 'fallback',
           }
         end
@@ -868,8 +875,27 @@ require('lazy').setup({
         --
         -- You can use 'stop_after_first' to run the first available formatter from the list
         javascript = { 'prettier' },
+        javascriptreact = { 'prettier' },
+        typescript = { 'prettier' },
+        typescriptreact = { 'prettier' },
       },
     },
+    init = function()
+      -- eslint_d does type-aware linting in this repo (parserOptions.projectService),
+      -- which can take seconds. Run its --fix asynchronously after the save completes
+      -- instead of blocking format_on_save, so saving/typing never waits on it.
+      vim.api.nvim_create_autocmd('BufWritePost', {
+        pattern = { '*.js', '*.jsx', '*.ts', '*.tsx' },
+        callback = function(args)
+          require('conform').format {
+            bufnr = args.buf,
+            async = true,
+            formatters = { 'eslint_d' },
+            lsp_format = 'never',
+          }
+        end,
+      })
+    end,
   },
 
   { -- Autocompletion
@@ -930,7 +956,7 @@ require('lazy').setup({
         -- <c-k>: Toggle signature help
         --
         -- See :h blink-cmp-config-keymap for defining your own keymap
-        preset = 'default',
+        preset = 'super-tab',
 
         -- navigation
         ['<C-j>'] = { 'select_next', 'fallback' },
@@ -1083,6 +1109,7 @@ require('lazy').setup({
         'vim',
         'go',
         'javascript',
+        'bicep',
       },
       -- Autoinstall languages that are not installed
       auto_install = true,
