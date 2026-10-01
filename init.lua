@@ -299,6 +299,18 @@ vim.api.nvim_create_autocmd('TextYankPost', {
   end,
 })
 
+-- clang picks the newest "Visual Studio" install to find the C headers, which here is SSMS 22 (no C tools),
+-- so tree-sitter parser builds fail with "'stdlib.h' file not found". Point clang at the real VS C tools instead.
+if vim.fn.has 'win32' == 1 and not vim.env.VCToolsInstallDir then
+  local files = vim.fn.glob('C:/Program Files/Microsoft Visual Studio/*/*/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt', false, true)
+  table.sort(files)
+  local file = files[#files]
+  if file then
+    local version = vim.trim(vim.fn.readfile(file)[1] or '')
+    vim.env.VCToolsInstallDir = vim.fs.normalize(vim.fs.dirname(file) .. '/../../Tools/MSVC/' .. version) .. '/'
+  end
+end
+
 -- [[ Install `lazy.nvim` plugin manager ]]
 --    See `:help lazy.nvim.txt` or https://github.com/folke/lazy.nvim for more info
 local lazypath = vim.fn.stdpath 'data' .. '/lazy/lazy.nvim'
