@@ -496,16 +496,72 @@ require('lazy').setup({
 
       -- [[ Configure Telescope ]]
       -- See `:help telescope` and `:help telescope.setup()`
+      -- Show file paths so the file name is always visible on the right. If the path is too
+      -- wide, whole folders are dropped from the left and replaced by '...'. Folder and file
+      -- names are never cut in the middle (only a single huge file name may still be cut).
+      -- `space` is how much room the path gets: a number <= 1 is a share of the result list
+      -- width (searches that show text after the path get less), a bigger number is a fixed width.
+      local function path_display_keep_filename(space)
+        return function(opts, path)
+          local cwd = opts.cwd and require('telescope.utils').path_expand(opts.cwd) or vim.uv.cwd()
+          path = require('plenary.path'):new(path):make_relative(cwd)
+
+          local max_width = space
+          if space <= 1 then
+            if opts.__results_width == nil then
+              local ok, status = pcall(require('telescope.state').get_status, vim.api.nvim_get_current_buf())
+              if not ok or not status or not status.layout or not status.layout.results then
+                return path
+              end
+              opts.__results_width = vim.api.nvim_win_get_width(status.layout.results.winid) - status.picker.selection_caret:len() - 2
+            end
+            local icon_width = (not opts.disable_devicons and pcall(require, 'nvim-web-devicons')) and 2 or 0
+            max_width = math.floor(opts.__results_width * space) - (opts.__prefix or icon_width)
+          end
+
+          if vim.fn.strdisplaywidth(path) <= max_width then
+            return path
+          end
+
+          local sep = path:match '[/\\]' or '/'
+          local parts = vim.split(path, '[/\\]', { trimempty = true })
+          local shown = parts[#parts]
+          for i = #parts - 1, 1, -1 do
+            local candidate = parts[i] .. sep .. shown
+            if vim.fn.strdisplaywidth('...' .. sep .. candidate) > max_width then
+              break
+            end
+            shown = candidate
+          end
+          return '...' .. sep .. shown
+        end
+      end
+
+      local only_path = path_display_keep_filename(1)
+      local workspace_symbols = { fname_width = 40, path_display = path_display_keep_filename(40) }
+
       require('telescope').setup {
         -- You can put your default mappings / updates / etc. in here
         --  All the info you're looking for is in `:help telescope.setup()`
         --
-        -- defaults = {
-        --   mappings = {
-        --     i = { ['<c-enter>'] = 'to_fuzzy_refine' },
-        --   },
-        -- },
-        -- pickers = {}
+        defaults = {
+          -- Grep, LSP (grr, gri, grd, grt, ...), quickfix and others show text after the path, so the path gets half the width.
+          path_display = path_display_keep_filename(0.5),
+          --   mappings = {
+          --     i = { ['<c-enter>'] = 'to_fuzzy_refine' },
+          --   },
+        },
+        pickers = {
+          -- These only show the path, so it may use the full width.
+          find_files = { path_display = only_path },
+          git_files = { path_display = only_path },
+          oldfiles = { path_display = only_path },
+          buffers = { path_display = only_path },
+          -- The path is the last column here, after the diagnostic text (half the width).
+          diagnostics = { path_display = path_display_keep_filename(0.4) },
+          lsp_workspace_symbols = workspace_symbols,
+          lsp_dynamic_workspace_symbols = workspace_symbols,
+        },
         extensions = {
           ['ui-select'] = {
             require('telescope.themes').get_dropdown(),
@@ -611,6 +667,130 @@ require('lazy').setup({
       -- If you're wondering about lsp vs treesitter, you can check out the wonderfully
       -- and elegantly composed help section, `:help lsp-vs-treesitter`
 
+      -- Some files have two language servers that answer the same question (in Angular .ts files
+      -- both `ts_ls` and `angularls`), so references/definitions came back twice. Drop results
+      -- that point to a spot an earlier server already returned. Both servers are still asked,
+      -- because angularls also finds uses inside HTML templates.
+      local location_methods = {
+        ['textDocument/references'] = true,
+        ['textDocument/definition'] = true,
+        ['textDocument/declaration'] = true,
+        ['textDocument/typeDefinition'] = true,
+        ['textDocument/implementation'] = true,
+      }
+      local buf_request_all = vim.lsp.buf_request_all
+      ---@diagnostic disable-next-line: duplicate-set-field
+      vim.lsp.buf_request_all = function(bufnr, method, params, handler)
+        if not location_methods[method] then
+          return buf_request_all(bufnr, method, params, handler)
+        end
+        return buf_request_all(bufnr, method, params, function(results, ...)
+          local seen = {}
+          for _, response in pairs(results) do
+            if response.result and not response.err then
+              local locations = vim.islist(response.result) and response.result or { response.result }
+              local kept = {}
+              for _, location in ipairs(locations) do
+                local uri = location.uri or location.targetUri
+                local range = location.range or location.targetSelectionRange
+                local key = uri and range and (vim.fs.normalize(vim.uri_to_fname(uri)):lower() .. ':' .. range.start.line .. ':' .. range.start.character)
+                if not key or not seen[key] then
+                  if key then
+                    seen[key] = true
+                  end
+                  table.insert(kept, location)
+                end
+              end
+              response.result = kept
+            end
+          end
+          return handler(results, ...)
+        end)
+      end
+
+      -- LSP references don't say whether a place reads or writes, so guess it from the text:
+      -- a write is the name followed by '=', '+=', '??=', '++', ... (not '==' or '=>'),
+      -- '++x' / '--x', or a declaration with a value ('let x: T = 1').
+      -- Indirect changes like 'list.push(x)' or 'patchState(...)' are not found.
+      local write_after_name = {
+        '^%s*=[^=>]',
+        '^!%s+=[^=]',
+        '^%s*[%+%-%*/%%&|%^]=',
+        '^%s*%*%*=',
+        '^%s*<<=',
+        '^%s*>>>?=',
+        '^%s*&&=',
+        '^%s*||=',
+        '^%s*%?%?=',
+        '^%s*%+%+',
+        '^%s*%-%-',
+      }
+      local function is_write(line, col)
+        local name = line:sub(col):match '^[%w_$#]+'
+        if not name then
+          return false
+        end
+        local before, after = line:sub(1, col - 1), line:sub(col + #name) .. ' '
+        for _, pattern in ipairs(write_after_name) do
+          if after:match(pattern) then
+            return true
+          end
+        end
+        if before:match '%+%+%s*$' or before:match '%-%-%s*$' then
+          return true
+        end
+        local declaration = before:match '%f[%w]let%s+$'
+          or before:match '%f[%w]const%s+$'
+          or before:match '%f[%w]var%s+$'
+          or before:match '%f[%w]readonly%s+$'
+          or before:match '%f[%w]private%s+$'
+          or before:match '%f[%w]protected%s+$'
+          or before:match '%f[%w]public%s+$'
+          or before:match '%f[%w]static%s+$'
+          or before:match '^%s*$'
+        return declaration ~= nil and after:match '^[!?]?%s*:[^;]-[^=!<>]=[^=>]' ~= nil
+      end
+
+      local function lsp_write_references()
+        local bufnr = vim.api.nvim_get_current_buf()
+        vim.lsp.buf_request_all(bufnr, 'textDocument/references', function(client)
+          local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+          params.context = { includeDeclaration = true }
+          return params
+        end, function(results)
+          local items, encoding = {}, 'utf-16'
+          for client_id, response in pairs(results) do
+            local client = vim.lsp.get_client_by_id(client_id)
+            if response.result and client then
+              encoding = client.offset_encoding
+              for _, item in ipairs(vim.lsp.util.locations_to_items(response.result, encoding)) do
+                if is_write(item.text or '', item.col) then
+                  table.insert(items, item)
+                end
+              end
+            end
+          end
+
+          if #items == 0 then
+            vim.notify('No write references found', vim.log.levels.WARN)
+          else
+            local conf = require('telescope.config').values
+            require('telescope.pickers')
+              .new({}, {
+                prompt_title = 'LSP Write References',
+                finder = require('telescope.finders').new_table {
+                  results = items,
+                  entry_maker = require('telescope.make_entry').gen_from_quickfix {},
+                },
+                previewer = conf.qflist_previewer {},
+                sorter = conf.generic_sorter {},
+                push_cursor_on_edit = true,
+              })
+              :find()
+          end
+        end)
+      end
+
       --  This function gets run when an LSP attaches to a particular buffer.
       --    That is to say, every time a new file is opened that is associated with
       --    an lsp (for example, opening `main.rs` is associated with `rust_analyzer`) this
@@ -638,6 +818,9 @@ require('lazy').setup({
 
           -- Find references for the word under your cursor.
           map('grr', require('telescope.builtin').lsp_references, '[G]oto [R]eferences')
+
+          -- Find only the places that write (assign/change) the word under your cursor.
+          map('grw', lsp_write_references, '[G]oto [W]rite references')
 
           -- Jump to the implementation of the word under your cursor.
           --  Useful when your language has ways of declaring types without an actual implementation.
@@ -1066,7 +1249,44 @@ require('lazy').setup({
       --  and try some other statusline plugin
       local statusline = require 'mini.statusline'
       -- set use_icons to true if you have a Nerd Font
-      statusline.setup { use_icons = vim.g.have_nerd_font }
+      -- Custom layout so the file name is always fully visible:
+      -- path relative to the project, long branch names shortened, and when space runs out
+      -- the git/LSP info is cut first (the '%<' marks where cutting starts).
+      statusline.setup {
+        use_icons = vim.g.have_nerd_font,
+        content = {
+          active = function()
+            local mode, mode_hl = statusline.section_mode { trunc_width = 120 }
+            local git = statusline.section_git { trunc_width = 40 }
+            local diff = statusline.section_diff { trunc_width = 75 }
+            local diagnostics = statusline.section_diagnostics { trunc_width = 75 }
+            local lsp = statusline.section_lsp { trunc_width = 75 }
+            local fileinfo = statusline.section_fileinfo { trunc_width = 120 }
+            local location = statusline.section_location { trunc_width = 75 }
+            local search = statusline.section_searchcount { trunc_width = 75 }
+
+            if vim.fn.strchars(git) > 35 then
+              git = vim.fn.strcharpart(git, 0, 34) .. '…'
+            end
+
+            local filename = '%t'
+            if vim.bo.buftype ~= 'terminal' then
+              local path = vim.fn.expand '%:~:.'
+              filename = (path == '' and '[No Name]' or path:gsub('%%', '%%%%')) .. '%m%r'
+            end
+
+            return statusline.combine_groups {
+              { hl = mode_hl, strings = { mode } },
+              '%<',
+              { hl = 'MiniStatuslineDevinfo', strings = { git, diff, diagnostics, lsp } },
+              { hl = 'MiniStatuslineFilename', strings = { filename } },
+              '%=',
+              { hl = 'MiniStatuslineFileinfo', strings = { fileinfo } },
+              { hl = mode_hl, strings = { search, location } },
+            }
+          end,
+        },
+      }
 
       -- You can configure sections in the statusline by overriding their
       -- default behavior. For example, here we set the section for
