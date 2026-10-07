@@ -187,6 +187,249 @@ end, {})
 -- or just use <C-\><C-n> to exit terminal mode
 vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 
+-- <C-y> toggles between terminal (typing) mode and normal mode in terminal buffers.
+-- Normal-mode mapping is buffer-local so <C-y> still scrolls in regular buffers.
+vim.keymap.set('t', '<C-y>', '<C-\\><C-n>', { desc = 'Toggle terminal mode (leave)' })
+
+-- gf in terminal buffers: find the path (optionally with :line[:col]) under the cursor,
+-- even when the terminal app wrapped it over several lines, and open it in the left window.
+local PATH_CHAR = '[^%s`\'"<>|()%[%]{}*,;]'
+local MAX_WRAP_LINES = 5
+local SEARCH_SKIP_DIRS = { ['.git'] = true, node_modules = true, bin = true, obj = true, dist = true, ['.angular'] = true }
+
+local function path_exists(p)
+  return p ~= '' and vim.uv.fs_stat(p) ~= nil
+end
+
+-- Split "file:12:5", "file:12-20" or "file#L12" into path, line, col
+local function parse_location(text)
+  -- Drop non-ASCII bytes at the edges (e.g. bullets, box lines)
+  text = text:gsub('^[\128-\255]+', ''):gsub('[\128-\255]+$', '')
+  text = text:gsub('^file:///', ''):gsub('[.:!?]+$', '')
+  local path, lnum, col = text:match '^(.-):(%d+):(%d+)$'
+  if not path then
+    path, lnum = text:match '^(.-):(%d+)%-%d+$'
+  end
+  if not path then
+    path, lnum = text:match '^(.-):(%d+)$'
+  end
+  if not path then
+    path, lnum = text:match '^(.-)#L(%d+)'
+  end
+  path = (path or text):gsub('[.:]+$', '')
+  return path, tonumber(lnum), tonumber(col)
+end
+
+local function resolve_path(path, roots)
+  if path:match '^%a:[\\/]' or path:match '^[\\/]' then
+    return path_exists(path) and path or nil
+  end
+  for _, root in ipairs(roots) do
+    local full = vim.fs.joinpath(root, path)
+    if path_exists(full) then
+      return full
+    end
+  end
+end
+
+-- All ways to read the path under the cursor, longest (most joined lines) first
+local function path_candidates(lines, row, col)
+  local line = lines[row]:gsub('%s+$', '')
+  if not line:sub(col, col):match(PATH_CHAR) then
+    return {}
+  end
+  local s, e = col, col
+  while s > 1 and line:sub(s - 1, s - 1):match(PATH_CHAR) do
+    s = s - 1
+  end
+  while e < #line and line:sub(e + 1, e + 1):match(PATH_CHAR) do
+    e = e + 1
+  end
+
+  local before, after = {}, {}
+  if s == (line:find '%S' or s) then
+    for r = row - 1, math.max(1, row - MAX_WRAP_LINES), -1 do
+      local prev = lines[r]:gsub('%s+$', '')
+      local part = prev:match('(' .. PATH_CHAR .. '+)$')
+      if not part then
+        break
+      end
+      table.insert(before, 1, part)
+      if part ~= vim.trim(prev) then
+        break
+      end
+    end
+  end
+  if e == #line then
+    for r = row + 1, math.min(#lines, row + MAX_WRAP_LINES) do
+      local nxt = lines[r]:gsub('%s+$', '')
+      local part = nxt:match('^%s*(' .. PATH_CHAR .. '+)')
+      if not part then
+        break
+      end
+      table.insert(after, part)
+      if part ~= vim.trim(nxt) then
+        break
+      end
+    end
+  end
+
+  local token = line:sub(s, e)
+  local result = {}
+  for b = #before, 0, -1 do
+    for a = #after, 0, -1 do
+      local text = table.concat(before, '', #before - b + 1) .. token .. table.concat(after, '', 1, a)
+      table.insert(result, text)
+    end
+  end
+  return result
+end
+
+-- Find files named `name` below `root`, skipping big generated folders
+local function search_by_name(root, name)
+  local found = {}
+  for rel, kind in vim.fs.dir(root, {
+    depth = 25,
+    skip = function(dir)
+      return not SEARCH_SKIP_DIRS[vim.fs.basename(dir)]
+    end,
+  }) do
+    if kind == 'file' and vim.fs.basename(rel) == name then
+      table.insert(found, vim.fs.joinpath(root, rel))
+      if #found >= 50 then
+        break
+      end
+    end
+  end
+  return found
+end
+
+local function terminal_goto_file()
+  local term_win = vim.api.nvim_get_current_win()
+  local term_buf = vim.api.nvim_get_current_buf()
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local lines = vim.api.nvim_buf_get_lines(term_buf, 0, -1, false)
+  -- Turn non-ASCII chars (non-breaking spaces, bullets, borders) into plain spaces of the same byte length,
+  -- so wrapped paths are detected and cursor columns stay the same
+  for i, l in ipairs(lines) do
+    lines[i] = l:gsub('[\192-\247][\128-\191]*', function(ch)
+      return (' '):rep(#ch)
+    end)
+  end
+  local roots = { vim.b[term_buf].term_cwd or vim.fn.getcwd(), vim.fn.getcwd() }
+
+  local candidates = path_candidates(lines, cursor[1], cursor[2] + 1)
+  local path, lnum, col
+  for _, text in ipairs(candidates) do
+    local p, l, c = parse_location(text)
+    path = resolve_path(p, roots)
+    if path then
+      lnum, col = l, c
+      break
+    end
+  end
+
+  local function is_normal(win)
+    return win ~= term_win and vim.api.nvim_win_get_config(win).relative == '' and vim.bo[vim.api.nvim_win_get_buf(win)].buftype ~= 'terminal'
+  end
+
+  local function open(file, l, c)
+    local target = vim.fn.win_getid(vim.fn.winnr 'h')
+    if not is_normal(target) then
+      target = nil
+      for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        if is_normal(win) then
+          target = win
+          break
+        end
+      end
+    end
+    if not target then
+      vim.cmd 'leftabove vsplit'
+      target = vim.api.nvim_get_current_win()
+    end
+    vim.api.nvim_set_current_win(target)
+    vim.cmd.edit(vim.fn.fnameescape(vim.fs.normalize(file)))
+    if l then
+      l = math.min(l, vim.api.nvim_buf_line_count(0))
+      vim.api.nvim_win_set_cursor(0, { l, math.max((c or 1) - 1, 0) })
+      vim.cmd 'normal! zz'
+    end
+  end
+
+  if path then
+    open(path, lnum, col)
+    return
+  end
+
+  -- Bare file name like "angular.json:12": search the project for it
+  local name
+  name, lnum, col = parse_location(candidates[#candidates] or '')
+  if name == '' or name:find '[\\/]' then
+    vim.notify('No file found under cursor. Text seen: ' .. vim.inspect(candidates), vim.log.levels.WARN)
+    return
+  end
+  local matches = search_by_name(roots[1], name)
+  if #matches == 0 then
+    vim.notify('No file found: ' .. name, vim.log.levels.WARN)
+  elseif #matches == 1 then
+    open(matches[1], lnum, col)
+  else
+    vim.ui.select(matches, {
+      prompt = 'Several files named ' .. name,
+      format_item = function(item)
+        return vim.fs.relpath and vim.fs.relpath(roots[1], item) or item
+      end,
+    }, function(choice)
+      if choice then
+        open(choice, lnum, col)
+      end
+    end)
+  end
+end
+
+vim.api.nvim_create_autocmd('TermOpen', {
+  group = vim.api.nvim_create_augroup('terminal-toggle-ctrl-y', { clear = true }),
+  callback = function(args)
+    vim.b[args.buf].term_cwd = vim.fn.getcwd()
+    vim.keymap.set('n', '<C-y>', 'i', { buffer = args.buf, desc = 'Toggle terminal mode (enter)' })
+    vim.keymap.set('n', 'gf', terminal_goto_file, { buffer = args.buf, desc = 'Go to file:line in the left window' })
+  end,
+})
+
+-- Toggle a single, persistent Copilot CLI terminal in a vertical split.
+local copilot_buf = nil
+vim.keymap.set('n', '<leader>cc', function()
+  local buf_ok = copilot_buf and vim.api.nvim_buf_is_valid(copilot_buf)
+  -- Start fresh if the copilot process has exited
+  if buf_ok then
+    local chan = vim.bo[copilot_buf].channel
+    if chan == 0 or vim.fn.jobwait({ chan }, 0)[1] ~= -1 then
+      vim.api.nvim_buf_delete(copilot_buf, { force = true })
+      buf_ok = false
+    end
+  end
+
+  if buf_ok then
+    local win = vim.fn.bufwinid(copilot_buf)
+    if win ~= -1 then
+      if #vim.api.nvim_tabpage_list_wins(0) == 1 then
+        vim.cmd 'enew'
+      else
+        vim.api.nvim_win_hide(win)
+      end
+      return
+    end
+    vim.cmd 'vsplit'
+    vim.api.nvim_win_set_buf(0, copilot_buf)
+  else
+    vim.cmd 'vsplit | terminal copilot'
+    copilot_buf = vim.api.nvim_get_current_buf()
+    vim.bo[copilot_buf].bufhidden = 'hide'
+  end
+  vim.cmd 'startinsert'
+end, { desc = 'Toggle [C]opilot [C]LI in a split' })
+
 -- TIP: Disable arrow keys in normal mode
 -- vim.keymap.set('n', '<left>', '<cmd>echo "Use h to move!!"<CR>')
 -- vim.keymap.set('n', '<right>', '<cmd>echo "Use l to move!!"<CR>')
@@ -214,6 +457,9 @@ vim.api.nvim_create_autocmd('FileType', {
   callback = function()
     vim.keymap.set('n', 'l', '<CR>', { remap = true, buffer = true })
     vim.keymap.set('n', 'h', '-', { remap = true, buffer = true })
+    -- netrw uses <C-l> for refresh; keep it for window navigation instead (refresh is on <leader>r)
+    vim.keymap.set('n', '<C-l>', '<C-w><C-l>', { buffer = true, desc = 'Move focus to the right window' })
+    vim.keymap.set('n', '<leader>r', '<Plug>NetrwRefresh', { buffer = true, desc = 'Netrw [R]efresh' })
   end,
 })
 
