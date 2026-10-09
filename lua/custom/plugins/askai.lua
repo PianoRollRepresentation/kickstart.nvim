@@ -1,4 +1,4 @@
--- askai — mark text in Neovim and ask GitHub Copilot CLI a question about it.
+-- askai — mark text in Neovim and ask Claude Code a question about it.
 --
 -- Select text in visual mode and press <leader>aa (or run :AskAI). The answer
 -- streams into a floating window; press i/a/<CR> to ask follow-ups, q to close.
@@ -9,31 +9,26 @@
 local M = {}
 
 local defaults = {
-  -- Executable + base flags for the GitHub Copilot CLI.
-  cmd = 'copilot',
-  -- Read-only, non-interactive access: allow only file view/search tools (no
-  -- edit/create/shell), so the CLI can read files but never modify anything.
+  -- Executable + base flags for Claude Code (print mode, streamed as JSON).
+  cmd = 'claude',
+  -- Read-only, non-interactive access: allow only file read/search tools (no
+  -- edit/write/shell), so the CLI can read files but never modify anything.
+  -- dontAsk denies every tool that is not explicitly allowed instead of prompting.
   args = {
-    '--no-color',
-    '--log-level',
-    'none',
-    '--no-custom-instructions',
-    '--allow-all-paths',
-    '--available-tools',
-    'view',
-    '--available-tools',
-    'grep',
-    '--available-tools',
-    'glob',
-    '--allow-tool',
-    'view',
-    '--allow-tool',
-    'grep',
-    '--allow-tool',
-    'glob',
+    '-p',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--tools=Read,Grep,Glob',
+    '--allowedTools=Read,Grep,Glob',
+    '--permission-mode',
+    'dontAsk',
   },
+  -- Extra environment for the CLI. Skips CLAUDE.md instruction files.
+  env = { CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1' },
   -- AI model and reasoning effort. Set either to false to use the CLI default.
-  model = 'claude-sonnet-5',
+  model = 'sonnet',
   effort = 'low',
   -- Working directory for the CLI. Defaults to Neovim's current directory so
   -- the model can resolve files relative to your session. Set to a fixed path
@@ -159,7 +154,7 @@ local function wrap(text, width)
 end
 
 --- Build the fixed header: the question followed by the quoted selection,
---- all inside a bordered input box (like the Copilot CLI prompt).
+--- all inside a bordered input box (like the Claude Code prompt).
 --- For follow-up turns `selection` is nil/empty, so only the question is shown.
 local function build_header(question, selection, _filetype)
   local maxw = math.max(30, math.floor(vim.o.columns * M.config.width) - 6)
@@ -209,18 +204,6 @@ end
 local spinner_frames = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local HINT = '─── press i to ask a follow-up • q to close ───'
 
---- Strip the leading "● Disabled tools: ..." notice the CLI prints when tools
---- are restricted. The block may wrap over several indented lines and ends at
---- the first blank line. While it is still streaming (no blank line yet), hide
---- it entirely so it never flashes on screen.
-local function clean_answer(s)
-  if s:match '^%s*●%s*Disabled tools:' then
-    local rest = s:match '^%s*●%s*Disabled tools:.-\n%s*\n(.*)$'
-    return rest or ''
-  end
-  return s
-end
-
 --- Run one CLI turn: commit the header, stream the answer, then finalize.
 --- Resumes the previous session when `state.session_id` is set.
 local function run_turn(state, header, prompt)
@@ -229,12 +212,34 @@ local function run_turn(state, header, prompt)
 
   local start = vim.uv.now()
   local answer, stderr_acc = '', ''
+  local final_result = nil
+  local pending = '' -- partial stdout line not yet terminated by "\n"
   local finished = false
+
+  -- Handle one stream-json event from the CLI.
+  local function on_event(ev)
+    if type(ev) ~= 'table' then
+      return
+    end
+    if type(ev.session_id) == 'string' then
+      state.session_id = ev.session_id
+    end
+    if ev.type == 'stream_event' and type(ev.event) == 'table' then
+      local e = ev.event
+      if e.type == 'message_start' and answer ~= '' and not answer:match '\n\n$' then
+        answer = answer .. '\n\n' -- separate text from consecutive assistant messages
+      elseif e.type == 'content_block_delta' and type(e.delta) == 'table' and e.delta.type == 'text_delta' then
+        answer = answer .. (e.delta.text or '')
+      end
+    elseif ev.type == 'result' and type(ev.result) == 'string' then
+      final_result = ev.result
+    end
+  end
 
   local function render()
     local i = (math.floor((vim.uv.now() - start) / 100) % #spinner_frames) + 1
     local secs = math.floor((vim.uv.now() - start) / 1000)
-    local shown = clean_answer(answer)
+    local shown = answer
     local verb = (shown == '') and 'Thinking' or 'Generating'
     local extra = {}
     if shown ~= '' then
@@ -261,7 +266,8 @@ local function run_turn(state, header, prompt)
 
   local args = vim.deepcopy(M.config.args)
   if state.session_id then
-    table.insert(args, '--resume=' .. state.session_id)
+    table.insert(args, '--resume')
+    table.insert(args, state.session_id)
   end
   if M.config.model then
     table.insert(args, '--model')
@@ -271,17 +277,32 @@ local function run_turn(state, header, prompt)
     table.insert(args, '--effort')
     table.insert(args, M.config.effort)
   end
-  table.insert(args, '-p')
-  table.insert(args, prompt)
 
   local cmd = { M.config.cmd }
   vim.list_extend(cmd, args)
 
+  -- The prompt goes through stdin to avoid command-line length/quoting limits.
   local sys_opts = {
     text = true,
+    stdin = prompt,
+    env = M.config.env or nil,
     stdout = function(_, data)
       if data and data ~= '' then
-        answer = answer .. data
+        pending = pending .. data
+        while true do
+          local nl = pending:find('\n', 1, true)
+          if not nl then
+            break
+          end
+          local line = pending:sub(1, nl - 1):gsub('\r$', '')
+          pending = pending:sub(nl + 1)
+          if line ~= '' then
+            local ok, ev = pcall(vim.json.decode, line)
+            if ok then
+              on_event(ev)
+            end
+          end
+        end
         vim.schedule(render)
       end
     end,
@@ -308,12 +329,16 @@ local function run_turn(state, header, prompt)
       stop_timer()
       state.handle = nil
 
-      local id = stderr_acc:match '%-%-resume=([0-9a-fA-F-]+)'
-      if id then
-        state.session_id = id
+      local tail = pending:gsub('\r$', '')
+      if tail ~= '' then
+        local ok_tail, ev = pcall(vim.json.decode, tail)
+        if ok_tail then
+          on_event(ev)
+        end
       end
 
-      answer = clean_answer(answer):gsub('%s+$', '')
+      -- The result event holds the final answer text; fall back to the stream.
+      answer = ((final_result and final_result ~= '') and final_result or answer):gsub('%s+$', '')
       local commit
       if answer ~= '' then
         commit = vim.split(answer, '\n', { plain = true })
@@ -416,7 +441,7 @@ function M.setup(opts)
 
   vim.api.nvim_create_user_command('AskAI', function()
     M.ask()
-  end, { range = true, desc = 'Ask Copilot CLI about the selected text' })
+  end, { range = true, desc = 'Ask Claude Code about the selected text' })
 
   if M.config.keymap and M.config.keymap ~= '' then
     vim.keymap.set('x', M.config.keymap, function()
@@ -429,8 +454,8 @@ end
 -- return an empty spec list (there is no external plugin to manage).
 M.setup {
   -- keymap = '<leader>aa',     -- visual-mode mapping ('' to disable)
-  -- model = 'claude-sonnet-5', -- or false to use the CLI default
-  -- effort = 'low',            -- none|minimal|low|medium|high|xhigh|max, or false
+  -- model = 'sonnet',          -- alias or full model name, or false to use the CLI default
+  -- effort = 'low',            -- low|medium|high|xhigh|max, or false
   -- cwd = nil,                 -- nil = Neovim's cwd; set a path to override
   -- timeout = 120000,          -- ms before the request is aborted
   -- width = 0.6, height = 0.6,

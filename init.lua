@@ -397,21 +397,21 @@ vim.api.nvim_create_autocmd('TermOpen', {
   end,
 })
 
--- Toggle a single, persistent Copilot CLI terminal in a vertical split.
-local copilot_buf = nil
+-- Toggle a single, persistent Claude Code terminal in a vertical split.
+local claude_buf = nil
 vim.keymap.set('n', '<leader>cc', function()
-  local buf_ok = copilot_buf and vim.api.nvim_buf_is_valid(copilot_buf)
-  -- Start fresh if the copilot process has exited
+  local buf_ok = claude_buf and vim.api.nvim_buf_is_valid(claude_buf)
+  -- Start fresh if the claude process has exited
   if buf_ok then
-    local chan = vim.bo[copilot_buf].channel
+    local chan = vim.bo[claude_buf].channel
     if chan == 0 or vim.fn.jobwait({ chan }, 0)[1] ~= -1 then
-      vim.api.nvim_buf_delete(copilot_buf, { force = true })
+      vim.api.nvim_buf_delete(claude_buf, { force = true })
       buf_ok = false
     end
   end
 
   if buf_ok then
-    local win = vim.fn.bufwinid(copilot_buf)
+    local win = vim.fn.bufwinid(claude_buf)
     if win ~= -1 then
       if #vim.api.nvim_tabpage_list_wins(0) == 1 then
         vim.cmd 'enew'
@@ -421,14 +421,14 @@ vim.keymap.set('n', '<leader>cc', function()
       return
     end
     vim.cmd 'vsplit'
-    vim.api.nvim_win_set_buf(0, copilot_buf)
+    vim.api.nvim_win_set_buf(0, claude_buf)
   else
-    vim.cmd 'vsplit | terminal copilot'
-    copilot_buf = vim.api.nvim_get_current_buf()
-    vim.bo[copilot_buf].bufhidden = 'hide'
+    vim.cmd 'vsplit | terminal claude'
+    claude_buf = vim.api.nvim_get_current_buf()
+    vim.bo[claude_buf].bufhidden = 'hide'
   end
   vim.cmd 'startinsert'
-end, { desc = 'Toggle [C]opilot [C]LI in a split' })
+end, { desc = 'Toggle [C]laude [C]ode in a split' })
 
 -- TIP: Disable arrow keys in normal mode
 -- vim.keymap.set('n', '<left>', '<cmd>echo "Use h to move!!"<CR>')
