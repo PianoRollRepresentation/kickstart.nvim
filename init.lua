@@ -362,14 +362,30 @@ local function terminal_goto_file()
     return
   end
 
-  -- Bare file name like "angular.json:12": search the project for it
-  local name
-  name, lnum, col = parse_location(candidates[#candidates] or '')
-  if name == '' or name:find '[\\/]' then
+  -- Bare file name like "angular.json:12", or a path relative to a subfolder like "Sub\File.cs:12":
+  -- search the project for files whose path ends with it
+  local name, matches = '', {}
+  local found_by_basename = {}
+  for _, text in ipairs(candidates) do
+    local p, l, c = parse_location(text)
+    if p ~= '' then
+      local suffix = vim.fs.normalize(p):lower():gsub('^%./', '')
+      local basename = vim.fs.basename(vim.fs.normalize(p))
+      found_by_basename[basename] = found_by_basename[basename] or search_by_name(roots[1], basename)
+      matches = vim.tbl_filter(function(file)
+        local f = vim.fs.normalize(file):lower()
+        return f == suffix or f:sub(-#suffix - 1) == '/' .. suffix
+      end, found_by_basename[basename])
+      name, lnum, col = p, l, c
+      if #matches > 0 then
+        break
+      end
+    end
+  end
+  if name == '' then
     vim.notify('No file found under cursor. Text seen: ' .. vim.inspect(candidates), vim.log.levels.WARN)
     return
   end
-  local matches = search_by_name(roots[1], name)
   if #matches == 0 then
     vim.notify('No file found: ' .. name, vim.log.levels.WARN)
   elseif #matches == 1 then
@@ -397,38 +413,48 @@ vim.api.nvim_create_autocmd('TermOpen', {
   end,
 })
 
--- Toggle a single, persistent Claude Code terminal in a vertical split.
-local claude_buf = nil
-vim.keymap.set('n', '<leader>cc', function()
-  local buf_ok = claude_buf and vim.api.nvim_buf_is_valid(claude_buf)
-  -- Start fresh if the claude process has exited
-  if buf_ok then
-    local chan = vim.bo[claude_buf].channel
-    if chan == 0 or vim.fn.jobwait({ chan }, 0)[1] ~= -1 then
-      vim.api.nvim_buf_delete(claude_buf, { force = true })
-      buf_ok = false
-    end
-  end
-
-  if buf_ok then
-    local win = vim.fn.bufwinid(claude_buf)
-    if win ~= -1 then
-      if #vim.api.nvim_tabpage_list_wins(0) == 1 then
-        vim.cmd 'enew'
-      else
-        vim.api.nvim_win_hide(win)
+-- Returns a function that toggles a single, persistent terminal running `cmd` in a vertical split.
+-- opts.pass_esc: send <Esc> straight to the program instead of the global <Esc><Esc> "exit terminal mode" map.
+local function make_terminal_toggle(cmd, opts)
+  opts = opts or {}
+  local term_buf = nil
+  return function()
+    local buf_ok = term_buf and vim.api.nvim_buf_is_valid(term_buf)
+    -- Start fresh if the process has exited
+    if buf_ok then
+      local chan = vim.bo[term_buf].channel
+      if chan == 0 or vim.fn.jobwait({ chan }, 0)[1] ~= -1 then
+        vim.api.nvim_buf_delete(term_buf, { force = true })
+        buf_ok = false
       end
-      return
     end
-    vim.cmd 'vsplit'
-    vim.api.nvim_win_set_buf(0, claude_buf)
-  else
-    vim.cmd 'vsplit | terminal claude'
-    claude_buf = vim.api.nvim_get_current_buf()
-    vim.bo[claude_buf].bufhidden = 'hide'
+
+    if buf_ok then
+      local win = vim.fn.bufwinid(term_buf)
+      if win ~= -1 then
+        if #vim.api.nvim_tabpage_list_wins(0) == 1 then
+          vim.cmd 'enew'
+        else
+          vim.api.nvim_win_hide(win)
+        end
+        return
+      end
+      vim.cmd 'vsplit'
+      vim.api.nvim_win_set_buf(0, term_buf)
+    else
+      vim.cmd('vsplit | terminal ' .. cmd)
+      term_buf = vim.api.nvim_get_current_buf()
+      vim.bo[term_buf].bufhidden = 'hide'
+      if opts.pass_esc then
+        vim.keymap.set('t', '<Esc>', '<Esc>', { buffer = term_buf, nowait = true, desc = 'Send <Esc> to ' .. cmd })
+      end
+    end
+    vim.cmd 'startinsert'
   end
-  vim.cmd 'startinsert'
-end, { desc = 'Toggle [C]laude [C]ode in a split' })
+end
+
+vim.keymap.set('n', '<leader>cc', make_terminal_toggle 'claude', { desc = 'Toggle [C]laude [C]ode in a split' })
+vim.keymap.set('n', '<leader>vv', make_terminal_toggle('copilot', { pass_esc = true }), { desc = 'Toggle Copilot CLI in a split' })
 
 -- TIP: Disable arrow keys in normal mode
 -- vim.keymap.set('n', '<left>', '<cmd>echo "Use h to move!!"<CR>')
@@ -1440,7 +1466,7 @@ require('lazy').setup({
       -- the rust implementation via `'prefer_rust_with_warning'`
       --
       -- See :h blink-cmp-config-fuzzy for more information
-      fuzzy = { implementation = 'lua' },
+      fuzzy = { implementation = 'prefer_rust_with_warning' },
 
       -- Shows a signature help window while you type arguments for a function
       signature = { enabled = true },

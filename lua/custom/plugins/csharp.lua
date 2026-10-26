@@ -54,6 +54,13 @@ return {
       {
         '<F7>',
         function()
+          require('dap').disconnect { terminateDebuggee = false }
+        end,
+        desc = 'Debug: Detach (keep process running)',
+      },
+      {
+        '<F8>',
+        function()
           require('dapui').toggle()
         end,
         desc = 'Debug: Toggle UI',
