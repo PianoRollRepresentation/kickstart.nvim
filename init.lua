@@ -448,13 +448,50 @@ local function make_terminal_toggle(cmd, opts)
       if opts.pass_esc then
         vim.keymap.set('t', '<Esc>', '<Esc>', { buffer = term_buf, nowait = true, desc = 'Send <Esc> to ' .. cmd })
       end
+      -- Remember which keys scroll this program, so the mouse wheel can send them (see terminal_wheel).
+      if opts.wheel then
+        vim.b[term_buf].wheel_keys = opts.wheel
+      end
     end
     vim.cmd 'startinsert'
   end
 end
 
-vim.keymap.set('n', '<leader>cc', make_terminal_toggle 'claude', { desc = 'Toggle [C]laude [C]ode in a split' })
-vim.keymap.set('n', '<leader>vv', make_terminal_toggle('copilot', { pass_esc = true }), { desc = 'Toggle Copilot CLI in a split' })
+-- Mouse wheel over a terminal that has 'wheel_keys' (pi): nvim's terminal on Windows does not pass
+-- the wheel to the program, so send the program's "scroll one line" key instead (3 lines per turn).
+-- Over any other window the wheel works as normal.
+local function terminal_wheel(dir)
+  local key = dir == 'up' and '<ScrollWheelUp>' or '<ScrollWheelDown>'
+  return function()
+    local win = vim.fn.getmousepos().winid
+    local buf = win ~= 0 and vim.api.nvim_win_get_buf(win) or nil
+    local keys = buf and vim.b[buf].wheel_keys
+    if not keys then
+      return key
+    end
+    vim.schedule(function()
+      vim.api.nvim_chan_send(vim.bo[buf].channel, keys[dir]:rep(3))
+    end)
+    return ''
+  end
+end
+for _, mode in ipairs { 'n', 't' } do
+  vim.keymap.set(mode, '<ScrollWheelUp>', terminal_wheel 'up', { expr = true, desc = 'Scroll (sends keys to pi)' })
+  vim.keymap.set(mode, '<ScrollWheelDown>', terminal_wheel 'down', { expr = true, desc = 'Scroll (sends keys to pi)' })
+end
+
+-- Show full colors in terminal buffers, and tell pi that full colors work here.
+-- Without this, pi inside nvim falls back to fewer colors and your messages are hard to tell apart.
+vim.o.termguicolors = true
+vim.env.PI_TRUE_COLOR = '1'
+
+-- '--use-theme dark': nvim's terminal does not report its colors, so pi's default 'system' theme
+-- would draw message and code boxes with no background. The 'dark' theme brings its own colors.
+vim.keymap.set('n', '<leader>vv', make_terminal_toggle('pi --use-theme dark', {
+  pass_esc = true,
+  -- Shift+Up / Shift+Down: bound to "scroll one line" in C:\Users\toko\.pi\agent\keybindings.json
+  wheel = { up = '\27[1;2A', down = '\27[1;2B' },
+}), { desc = 'Toggle pi in a split' })
 
 -- TIP: Disable arrow keys in normal mode
 -- vim.keymap.set('n', '<left>', '<cmd>echo "Use h to move!!"<CR>')
