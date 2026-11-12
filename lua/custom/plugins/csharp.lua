@@ -156,7 +156,23 @@ return {
         },
       }
 
-      dapui.setup()
+      -- Default dap-ui icons need a Nerd Font; fall back to plain Unicode when there is none.
+      dapui.setup(vim.g.have_nerd_font and {} or {
+        icons = { expanded = '▾', collapsed = '▸', current_frame = '→' },
+        controls = {
+          icons = {
+            pause = '⏸',
+            play = '▶',
+            step_into = '↓',
+            step_over = '↷',
+            step_out = '↑',
+            step_back = '↶',
+            run_last = '↻',
+            terminate = '■',
+            disconnect = '⏏',
+          },
+        },
+      })
 
       -- Breakpoint icons: red dot instead of the letter "B"
       vim.api.nvim_set_hl(0, 'DapBreak', { fg = '#e51400' })
