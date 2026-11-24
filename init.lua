@@ -1642,6 +1642,11 @@ require('lazy').setup({
     config = function()
       local ts = require 'nvim-treesitter'
 
+      -- No MSVC installed; zig-cc.cmd (in ~/.local/bin) wraps zig cc for tree-sitter builds
+      if vim.fn.has 'win32' == 1 and not vim.env.CC and vim.fn.executable 'zig-cc.cmd' == 1 then
+        vim.env.CC = 'zig-cc.cmd'
+      end
+
       ts.install {
         'bash',
         'c',
