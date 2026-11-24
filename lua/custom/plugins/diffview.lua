@@ -3,6 +3,7 @@ return {
   cmd = { 'DiffviewOpen', 'DiffviewClose', 'DiffviewToggleFiles', 'DiffviewFocusFiles', 'DiffviewFileHistory', 'DiffviewRefresh' },
   keys = {
     { '<leader>gd', '<cmd>DiffviewOpen<cr>', desc = '[G]it [D]iff view' },
+    { '<leader>ga', '<cmd>DiffviewOpen main...HEAD<cr>', desc = '[G]it diff [A]gainst main' },
     { '<leader>gD', '<cmd>DiffviewClose<cr>', desc = '[G]it [D]iff close' },
     { '<leader>gh', '<cmd>DiffviewFileHistory<cr>', desc = '[G]it file [H]istory (repo)' },
     { '<leader>gf', '<cmd>DiffviewFileHistory %<cr>', desc = '[G]it [F]ile history (current)' },
